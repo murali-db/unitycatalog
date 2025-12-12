@@ -261,36 +261,70 @@ private class UCProxy(
     }.toArray
     val uri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
+
+    // Debug logging helper - writes to /tmp/fgac_debug.log
+    def fgacLog(msg: String): Unit = {
+      val timestamp = java.time.LocalDateTime.now().format(
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+      val line = s"[$timestamp] [UCSingleCatalog] $msg\n"
+      // scalastyle:off println
+      System.out.println(s"[FGAC-UC] $msg")
+      // scalastyle:on println
+      try {
+        val fw = new java.io.FileWriter("/tmp/fgac_debug.log", true)
+        fw.write(line)
+        fw.close()
+      } catch { case _: Exception => }
+    }
+
+    fgacLog(s"loadTable called for tableId: $tableId (FGAC-ENABLED UC VERSION)")
+
     // Try to get credentials - may fail for FGAC (row filter/column mask) tables
     // In that case, return None and let downstream code use server-side planning
     val temporaryCredentials: Option[TemporaryCredentials] = {
       try {
-        Some(temporaryCredentialsApi
+        fgacLog("Attempting READ_WRITE credentials...")
+        val creds = temporaryCredentialsApi
           .generateTemporaryTableCredentials(
             // TODO: at this time, we don't know if the table will be read or written. For now we always
             //       request READ_WRITE credentials as the server doesn't distinguish between READ and
             //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
             //       for read or write, we can request the proper credential after fixing Spark.
             new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE)
-          ))
+          )
+        fgacLog("READ_WRITE credentials succeeded")
+        Some(creds)
       } catch {
-        case _: ApiException =>
+        case e: ApiException =>
+          fgacLog(s"READ_WRITE credentials failed: ${e.getMessage}")
           try {
-            Some(temporaryCredentialsApi
+            fgacLog("Attempting READ credentials...")
+            val creds = temporaryCredentialsApi
               .generateTemporaryTableCredentials(
                 new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ)
-              ))
+              )
+            fgacLog("READ credentials succeeded")
+            Some(creds)
           } catch {
-            case _: ApiException =>
+            case e2: ApiException =>
               // FGAC tables: credentials not available, return None
               // Downstream code will use server-side planning with presigned URLs
+              fgacLog(s"READ credentials also failed (FGAC table): ${e2.getMessage}")
+              fgacLog("Returning None - will use server-side planning")
               None
           }
       }
     }
+
+    fgacLog(s"temporaryCredentials result: ${if (temporaryCredentials.isDefined) "Some(creds)" else "None"}")
+
     val extraSerdeProps = temporaryCredentials match {
-      case Some(creds) => UCSingleCatalog.generateCredentialProps(uri.getScheme, creds)
-      case None => Map.empty[String, String]  // No credentials for FGAC tables
+      case Some(creds) =>
+        fgacLog("Using credentials for table properties")
+        UCSingleCatalog.generateCredentialProps(uri.getScheme, creds)
+      case None =>
+        fgacLog("No credentials - table will use server-side planning")
+        Map.empty[String, String]  // No credentials for FGAC tables
     }
     val sparkTable = CatalogTable(
       identifier,
