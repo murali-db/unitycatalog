@@ -34,21 +34,49 @@ class UCSingleCatalog
 
   @volatile private var delegate: TableCatalog = null
 
+  // Helper to write debug logs to file
+  private def debugLog(msg: String): Unit = {
+    val timestamp = java.time.LocalDateTime.now().format(
+      java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+    val line = s"[$timestamp] [UCSingleCatalog.init] $msg\n"
+    try {
+      val fw = new java.io.FileWriter("/tmp/fgac_debug.log", true)
+      fw.write(line)
+      fw.close()
+    } catch { case _: Exception => }
+  }
+
   override def initialize(name: String, options: CaseInsensitiveStringMap): Unit = {
+    debugLog(s"=== UCSingleCatalog.initialize called for catalog: $name ===")
+    debugLog(s"Options keys: ${options.keySet()}")
+
     val urlStr = options.get("uri")
     if (urlStr == null) {
       throw new IllegalArgumentException(s"uri must be specified for Unity Catalog '$name'")
     }
     val url = new URI(urlStr)
+
+    debugLog(s"URI: $urlStr")
+    debugLog(s"Host: ${url.getHost}, Port: ${url.getPort}, Scheme: ${url.getScheme}, Path: ${url.getRawPath}")
+
     apiClient = new ApiClient()
       .setHost(url.getHost)
       .setPort(url.getPort)
       .setScheme(url.getScheme)
+      .setBasePath(url.getRawPath)  // FIX: Set basePath from URI
+
+    debugLog(s"ApiClient configured with basePath: ${url.getRawPath}")
+
     val token = options.get("token")
+    debugLog(s"Token present: ${token != null && token.nonEmpty}, Token length: ${if (token != null) token.length else 0}")
+
     if (token != null && token.nonEmpty) {
       apiClient = apiClient.setRequestInterceptor { request =>
         request.header("Authorization", "Bearer " + token)
       }
+      debugLog("Bearer token interceptor set")
+    } else {
+      debugLog("WARNING: No token provided!")
     }
     temporaryCredentialsApi = new TemporaryCredentialsApi(apiClient)
     val proxy = new UCProxy(apiClient, temporaryCredentialsApi)
