@@ -261,25 +261,37 @@ private class UCProxy(
     }.toArray
     val uri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
-    val temporaryCredentials = {
+    // Try to get credentials - may fail for FGAC (row filter/column mask) tables
+    // In that case, return None and let downstream code use server-side planning
+    val temporaryCredentials: Option[TemporaryCredentials] = {
       try {
-        temporaryCredentialsApi
+        Some(temporaryCredentialsApi
           .generateTemporaryTableCredentials(
             // TODO: at this time, we don't know if the table will be read or written. For now we always
             //       request READ_WRITE credentials as the server doesn't distinguish between READ and
             //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
             //       for read or write, we can request the proper credential after fixing Spark.
             new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE)
-          )
+          ))
       } catch {
-        case e: ApiException => temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ)
-          )
+        case _: ApiException =>
+          try {
+            Some(temporaryCredentialsApi
+              .generateTemporaryTableCredentials(
+                new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ)
+              ))
+          } catch {
+            case _: ApiException =>
+              // FGAC tables: credentials not available, return None
+              // Downstream code will use server-side planning with presigned URLs
+              None
+          }
       }
     }
-    val extraSerdeProps = UCSingleCatalog.generateCredentialProps(
-      uri.getScheme, temporaryCredentials)
+    val extraSerdeProps = temporaryCredentials match {
+      case Some(creds) => UCSingleCatalog.generateCredentialProps(uri.getScheme, creds)
+      case None => Map.empty[String, String]  // No credentials for FGAC tables
+    }
     val sparkTable = CatalogTable(
       identifier,
       tableType = if (t.getTableType == TableType.MANAGED) {
